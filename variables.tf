@@ -27,3 +27,9 @@ variable "neutron_package_version" {
   type        = string
   default     = "2:28.0.2-0ubuntu1"
 }
+
+variable "regress_stack_commit" {
+  description = "Immutable regress-stack PR 96 source revision used by the lab deployer."
+  type        = string
+  default     = "a37016f35b4fc67701a9c9edee44baa500c33d99"
+}

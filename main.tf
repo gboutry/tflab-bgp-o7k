@@ -1,6 +1,13 @@
 locals {
+  inventory_json = jsonencode(jsondecode(replace(
+    file("${path.module}/inventory.json"), "nbgp", var.name_prefix
+  )))
+
   networks = {
-    mgmt        = { name = "${var.name_prefix}-mgmt", ipv4 = "10.246.20.1/24", nat = "true" }
+    mgmt = {
+      name       = "${var.name_prefix}-mgmt", ipv4 = "10.246.20.1/24", nat = "true"
+      dhcp_range = "10.246.20.100-10.246.20.200"
+    }
     client      = { name = "${var.name_prefix}-client", ipv4 = "none", nat = "false" }
     physnet     = { name = "${var.name_prefix}-physnet", ipv4 = "none", nat = "false" }
     leaf1_hosts = { name = "${var.name_prefix}-l1-hosts", ipv4 = "none", nat = "false" }
@@ -91,12 +98,15 @@ resource "lxd_network" "lab" {
 
   name = each.value.name
   type = "bridge"
-  config = {
-    "ipv4.address" = each.value.ipv4
-    "ipv4.nat"     = each.value.nat
-    "ipv6.address" = "none"
-    "dns.domain"   = "${var.name_prefix}.test"
-  }
+  config = merge(
+    {
+      "ipv4.address" = each.value.ipv4
+      "ipv4.nat"     = each.value.nat
+      "ipv6.address" = "none"
+      "dns.domain"   = "${var.name_prefix}.test"
+    },
+    each.key == "mgmt" ? { "ipv4.dhcp.ranges" = each.value.dhcp_range } : {}
+  )
 }
 
 resource "lxd_instance" "node" {
@@ -150,6 +160,35 @@ resource "lxd_instance" "node" {
       name       = device.key
       type       = device.value.type
       properties = device.value.properties
+    }
+  }
+}
+
+resource "terraform_data" "deploy" {
+  triggers_replace = [
+    var.name_prefix,
+    var.neutron_package_version,
+    var.regress_stack_commit,
+    filesha256("${path.module}/deploy.sh"),
+    filesha256("${path.module}/main.tf"),
+    filesha256("${path.module}/inventory.json"),
+    sha256(join("", [
+      for template in sort(fileset(path.module, "bird/*.tftpl")) :
+      filesha256("${path.module}/${template}")
+    ])),
+    sha256(jsonencode({ for name, instance in lxd_instance.node : name => instance.mac_address })),
+  ]
+
+  depends_on = [lxd_instance.node]
+
+  provisioner "local-exec" {
+    command = "bash \"${path.module}/deploy.sh\""
+
+    environment = {
+      NAME_PREFIX       = var.name_prefix
+      REGRESS_STACK_SHA = var.regress_stack_commit
+      NEUTRON_VERSION   = var.neutron_package_version
+      INVENTORY_JSON    = local.inventory_json
     }
   }
 }
