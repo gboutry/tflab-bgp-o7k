@@ -1,0 +1,59 @@
+router id ${router_id};
+
+protocol device {}
+
+# The Neutron/OVN dynamic-routing VRF exports floating-IP /32s in table 42.
+protocol kernel ovn_advertisements {
+    kernel table 42;
+    learn;
+    ipv4 {
+        import filter {
+            if net.len = 32 then accept;
+            reject;
+        };
+        export none;
+    };
+}
+
+# Learn only the leaf default into OVN's chassis VRF (table 10).
+ipv4 table egress;
+protocol pipe default_to_ovn {
+    table master4;
+    peer table egress;
+    import none;
+    export filter {
+        if source = RTS_BGP &&
+           (net = 0.0.0.0/0 || net = ${client_prefix}) then accept;
+        reject;
+    };
+}
+protocol kernel ovn_egress {
+    kernel table 10;
+    ipv4 {
+        table egress;
+        import none;
+        export all;
+    };
+}
+
+# IPv4 NLRI uses the IPv6 link-local next hop on the leaf-facing bridge.
+protocol bgp leaf {
+    local ${local_link} as ${local_asn};
+    interface "${bridge}";
+    neighbor fe80::1 as ${leaf_asn};
+    ipv4 {
+        extended next hop on;
+        import filter {
+            if net = 0.0.0.0/0 || net = ${client_prefix} then accept;
+            reject;
+        };
+        export filter {
+            if source = RTS_INHERIT && net.len = 32 then {
+                bgp_med = 100;
+                accept;
+            }
+            reject;
+        };
+        next hop self;
+    };
+}

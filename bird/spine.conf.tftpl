@@ -1,0 +1,29 @@
+router id 192.0.2.13;
+protocol device {}
+protocol direct { ipv4; }
+protocol kernel { ipv4 { import all; export all; }; }
+
+filter host_routes {
+    if net.len = 32 || net = 172.20.10.0/24 then accept;
+    reject;
+}
+
+protocol bgp leaf1 {
+    local 172.20.0.2 as 65000;
+    neighbor 172.20.0.1 as 65001;
+    ipv4 {
+        import filter host_routes;
+        export filter host_routes;
+        next hop self;
+    };
+}
+
+protocol bgp leaf2 {
+    local 172.20.0.6 as 65000;
+    neighbor 172.20.0.5 as 65002;
+    ipv4 {
+        import filter host_routes;
+        export filter host_routes;
+        next hop self;
+    };
+}
