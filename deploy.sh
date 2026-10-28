@@ -252,6 +252,13 @@ for node in hc1 hc2 hc3; do
     esac
 done
 
+log "Configuring headless Ceph-backed test workloads"
+for node in hc1 hc2 hc3; do
+    remote "$node" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-block-extra
+    remote "$node" crudini --set /etc/nova/nova.conf spice enabled false
+    remote "$node" systemctl restart nova-compute
+done
+
 log "Creating provider and overlay networks and guest workloads"
 if ! os network show external-network >/dev/null 2>&1; then
     os network create --external --share --provider-network-type flat \

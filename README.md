@@ -190,7 +190,10 @@ The test floating IPs and instances are:
 | `bgp-test-vm` | HC3 | `10.244.0.110` | `172.20.20.60` |
 
 Cirros 0.6.3 is downloaded from its upstream release directory and checked
-against its published SHA256 before upload. The lab allows ICMP ingress to
+against its published SHA256 before upload. The test guests run headless:
+SPICE is disabled because Resolute's QEMU does not support it. The deployer
+installs Ubuntu's `qemu-block-extra` package so QEMU can open the configured
+Ceph RBD disks. The lab allows ICMP ingress to
 these test guests only.
 
 ## Inspect and troubleshoot
