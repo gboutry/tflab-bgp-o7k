@@ -267,7 +267,6 @@ locals {
           { path = "/etc/sysctl.d/90-${var.name_prefix}-routing.conf", permissions = "0644", content = "net.ipv4.ip_forward=1\nnet.ipv4.conf.all.rp_filter=0\nnet.ipv4.conf.default.rp_filter=0\n" }
         ] : [],
         spec.role == "hc" ? [
-          { path = "/etc/apt/sources.list.d/resolute-proposed.sources", permissions = "0644", content = "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: resolute-proposed\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n" },
           { path = "/etc/apt/preferences.d/90-${var.name_prefix}-neutron", permissions = "0644", content = "Package: neutron neutron-* python3-neutron*\nPin: version ${var.neutron_package_version}\nPin-Priority: 1001\n" },
         ] : []
       )

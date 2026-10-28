@@ -47,7 +47,7 @@ Leaf1 and has no L2 attachment to the HC networks.
   of the BGP acceptance test.
 
 The lab uses Resolute packages and pins Neutron to
-`2:28.0.2-0ubuntu1` from `resolute-proposed`. The deployer builds
+`2:28.0.2-0ubuntu1` from `resolute-updates`. The deployer builds
 `python3-regress-stack` from the pinned PR commit on HC1, installs that same
 package on all HCs, then uses the PR's `packages`, `setup`, and `ready`
 commands. It does not depend on a local checkout of regress-stack. The build applies
