@@ -36,13 +36,15 @@ protocol kernel ovn_egress {
     };
 }
 
-# IPv4 NLRI uses the IPv6 link-local next hop on the leaf-facing bridge.
+# Chassis-to-ToR transport and next hops follow the selected peering mode.
 protocol bgp leaf {
-    local ${local_link} as ${local_asn};
+    local ${local_address} as ${local_asn};
     interface "${bridge}";
-    neighbor fe80::1 as ${leaf_asn};
+    neighbor ${leaf_address} as ${leaf_asn};
     ipv4 {
+%{ if !numbered ~}
         extended next hop on;
+%{ endif ~}
         import filter {
             if net = 0.0.0.0/0 || net = ${client_prefix} then accept;
             reject;

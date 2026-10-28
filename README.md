@@ -87,6 +87,59 @@ resources you do not intend to change. `terraform destroy` removes only the
 LXD resources in that working directory; the OpenStack objects live on those
 VM disks and disappear with them.
 
+## Choose chassis-to-ToR peering
+
+Set `bgp_peering_mode` in `terraform.tfvars` so subsequent applies retain
+that choice:
+
+```hcl
+bgp_peering_mode = "ipv4-numbered"
+```
+
+The default, `"unnumbered"`, retains IPv6 link-local BGP transport and
+extended next hops for IPv4 routes. `"ipv4-numbered"` uses IPv4 transport
+and IPv4 next hops only for the chassis-to-ToR sessions; the spine links,
+ASNs, provider network, and workload addressing stay the same.
+
+| Link | Chassis address on `br-bgp` | ToR address on `eth1` |
+|---|---|---|
+| HC1 → Leaf1 | `172.20.1.11/24` | `172.20.1.1/24` |
+| HC2 → Leaf1 | `172.20.1.12/24` | `172.20.1.1/24` |
+| HC3 → Leaf2 | `172.20.2.13/24` | `172.20.2.1/24` |
+
+Run `terraform plan -out=lab.tfplan`, review it, then
+`terraform apply lab.tfplan`. Changing the mode **replaces all seven lab
+instances**, including their OpenStack state and any locally installed fix.
+The LXD networks remain. This is deliberate: cloud-init templates do not
+reconfigure existing guests on an in-place update. In-place switching is
+not implemented. To switch back, set the variable to `"unnumbered"` and
+plan/apply again.
+
+Numbered mode is a reproducer for Neutron's numbered BGP integration and
+for testing a fix; it does not include that fix. The deployer still requires
+BGP sessions, table 42 FIP routes, table 10 return routes via the selected
+ToR address, fabric propagation, and client pings. An unfixed Neutron may
+therefore fail the apply. Guests remain available for inspecting and
+installing a fix; re-run `terraform apply` after correcting the failure.
+The deployer retains its pinned Neutron package check on retries, so use a
+matching version when installing a rebuilt package or override
+`neutron_package_version` when deploying a different published version.
+
+Local configuration checks (Terraform >= 1.7 for provider mocks):
+
+```sh
+terraform fmt -check
+terraform validate
+terraform test
+python3 -m unittest discover -s tests
+bash -n deploy.sh
+shellcheck deploy.sh
+```
+
+The Terraform tests render both modes with a mocked LXD provider and do
+not create guests or exercise Neutron. Live acceptance remains the
+route and ping checks in `deploy.sh` against a deployed lab.
+
 ## What apply configures
 
 1. Terraform creates the seven isolated LXD bridges and seven instances.

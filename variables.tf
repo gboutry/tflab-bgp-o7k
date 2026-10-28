@@ -33,3 +33,14 @@ variable "regress_stack_commit" {
   type        = string
   default     = "a37016f35b4fc67701a9c9edee44baa500c33d99"
 }
+
+variable "bgp_peering_mode" {
+  description = "Chassis-to-ToR peering: unnumbered (IPv6 link-local) or ipv4-numbered. Changing mode replaces the lab instances."
+  type        = string
+  default     = "unnumbered"
+
+  validation {
+    condition     = contains(["unnumbered", "ipv4-numbered"], var.bgp_peering_mode)
+    error_message = "bgp_peering_mode must be unnumbered or ipv4-numbered."
+  }
+}

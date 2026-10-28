@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+BGP_PEERING_MODE=${BGP_PEERING_MODE:-unnumbered}
+case "$BGP_PEERING_MODE" in
+    unnumbered|ipv4-numbered) ;;
+    *) echo "Invalid BGP_PEERING_MODE: $BGP_PEERING_MODE" >&2; exit 1 ;;
+esac
+
 PREFIX=$NAME_PREFIX
 REVISION=$REGRESS_STACK_SHA
 TMP_DIR="$(mktemp -d /tmp/nbgp-deploy.XXXXXX)"
@@ -49,10 +55,17 @@ hc_has_fip_route() {
     grep -Fq "$2 proto ovn" <<<"$routes"
 }
 hc_has_return_routes() {
-    local routes
+    local routes gateway
+    gateway='inet6 fe80::1'
+    if [[ "$BGP_PEERING_MODE" == ipv4-numbered ]]; then
+        case "$1" in
+            hc1|hc2) gateway=172.20.1.1 ;;
+            hc3) gateway=172.20.2.1 ;;
+        esac
+    fi
     routes=$(remote "$1" ip -4 route show table 10)
     grep -Fq '172.20.10.0/24' <<<"$routes" &&
-        grep -Fq 'default via inet6 fe80::1 dev br-bgp' <<<"$routes"
+        grep -Fq "default via $gateway dev br-bgp" <<<"$routes"
 }
 leaf_has_all_fips() {
     local routes
@@ -159,11 +172,15 @@ wait_for "regress-stack ready" remote hc1 regress-stack ready
 remote hc1 regress-stack ready
 
 log "Configuring Neutron BGP and persistent peer bridges"
-for item in "hc1 fe80::101" "hc2 fe80::102" "hc3 fe80::103"; do
-    read -r node link_local <<<"$item"
-    remote_script "$node" "$link_local" <<'REMOTE'
+for item in "hc1 fe80::101 172.20.1.11" "hc2 fe80::102 172.20.1.12" "hc3 fe80::103 172.20.2.13"; do
+    read -r node link_local ipv4 <<<"$item"
+    address_command="/usr/sbin/ip -6 addr replace $link_local/64 dev br-bgp"
+    if [[ "$BGP_PEERING_MODE" == ipv4-numbered ]]; then
+        address_command="/usr/sbin/ip -4 addr replace $ipv4/24 dev br-bgp"
+    fi
+    remote_script "$node" "$address_command" <<'REMOTE'
 set -Eeuo pipefail
-link_local=$1
+address_command=$1
 conf=/etc/neutron/neutron.conf
 plugins=$(crudini --get "$conf" DEFAULT service_plugins 2>/dev/null || true)
 case ",$plugins," in
@@ -196,7 +213,7 @@ ExecStart=/usr/bin/ovs-vsctl --may-exist add-br br-bgp
 ExecStart=/usr/bin/ovs-vsctl --may-exist add-port br-bgp enp5s0
 ExecStart=/usr/sbin/ip link set enp5s0 up
 ExecStart=/usr/sbin/ip link set br-bgp up
-ExecStart=/usr/sbin/ip -6 addr replace $link_local/64 dev br-bgp
+ExecStart=$address_command
 ExecStart=/usr/bin/ovs-vsctl set Open_vSwitch . external-ids:neutron-bgp-peer-bridges=br-bgp
 RemainAfterExit=yes
 

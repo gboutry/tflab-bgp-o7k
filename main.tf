@@ -1,4 +1,11 @@
 locals {
+  numbered = var.bgp_peering_mode == "ipv4-numbered"
+  # HC1/HC2 share Leaf1's L2; HC3 has a separate subnet behind Leaf2.
+  hc_peers = {
+    hc1 = { address = "172.20.1.11", leaf = "172.20.1.1", link_local = "fe80::101" }
+    hc2 = { address = "172.20.1.12", leaf = "172.20.1.1", link_local = "fe80::102" }
+    hc3 = { address = "172.20.2.13", leaf = "172.20.2.1", link_local = "fe80::103" }
+  }
   inventory_json = jsonencode(jsondecode(replace(
     file("${path.module}/inventory.json"), "nbgp", var.name_prefix
   )))
@@ -44,7 +51,7 @@ locals {
     leaf1 = {
       type = "container", role = "leaf1", mgmt = 21, cpu = "1", memory = "512MiB", disk = "8GiB"
       interfaces = {
-        hosts0  = { network = "leaf1_hosts", ifname = "eth1", addresses = ["fe80::1/64"], routes = [] }
+        hosts0  = { network = "leaf1_hosts", ifname = "eth1", addresses = [local.numbered ? "172.20.1.1/24" : "fe80::1/64"], routes = [] }
         spine0  = { network = "spine_leaf1", ifname = "eth2", addresses = ["172.20.0.1/30"], routes = [] }
         client0 = { network = "client", ifname = "eth3", addresses = ["172.20.10.1/24"], routes = [] }
       }
@@ -53,7 +60,7 @@ locals {
     leaf2 = {
       type = "container", role = "leaf2", mgmt = 22, cpu = "1", memory = "512MiB", disk = "8GiB"
       interfaces = {
-        hosts0 = { network = "leaf2_hosts", ifname = "eth1", addresses = ["fe80::1/64"], routes = [] }
+        hosts0 = { network = "leaf2_hosts", ifname = "eth1", addresses = [local.numbered ? "172.20.2.1/24" : "fe80::1/64"], routes = [] }
         spine0 = { network = "spine_leaf2", ifname = "eth2", addresses = ["172.20.0.5/30"], routes = [] }
       }
       asn = 65002
@@ -79,16 +86,37 @@ locals {
 
   bird_configs = {
     hc1 = templatefile("${path.module}/bird/hyperconverged.conf.tftpl", {
-      router_id = "10.246.20.11", local_asn = 65101, local_link = "fe80::101", bridge = "br-bgp", leaf_asn = 65001, client_prefix = "172.20.10.0/24"
+      router_id     = "10.246.20.11"
+      local_asn     = 65101
+      local_address = local.numbered ? local.hc_peers.hc1.address : local.hc_peers.hc1.link_local
+      leaf_address  = local.numbered ? local.hc_peers.hc1.leaf : "fe80::1"
+      numbered      = local.numbered
+      bridge        = "br-bgp"
+      leaf_asn      = 65001
+      client_prefix = "172.20.10.0/24"
     })
     hc2 = templatefile("${path.module}/bird/hyperconverged.conf.tftpl", {
-      router_id = "10.246.20.12", local_asn = 65102, local_link = "fe80::102", bridge = "br-bgp", leaf_asn = 65001, client_prefix = "172.20.10.0/24"
+      router_id     = "10.246.20.12"
+      local_asn     = 65102
+      local_address = local.numbered ? local.hc_peers.hc2.address : local.hc_peers.hc2.link_local
+      leaf_address  = local.numbered ? local.hc_peers.hc2.leaf : "fe80::1"
+      numbered      = local.numbered
+      bridge        = "br-bgp"
+      leaf_asn      = 65001
+      client_prefix = "172.20.10.0/24"
     })
     hc3 = templatefile("${path.module}/bird/hyperconverged.conf.tftpl", {
-      router_id = "10.246.20.13", local_asn = 65103, local_link = "fe80::103", bridge = "br-bgp", leaf_asn = 65002, client_prefix = "172.20.10.0/24"
+      router_id     = "10.246.20.13"
+      local_asn     = 65103
+      local_address = local.numbered ? local.hc_peers.hc3.address : local.hc_peers.hc3.link_local
+      leaf_address  = local.numbered ? local.hc_peers.hc3.leaf : "fe80::1"
+      numbered      = local.numbered
+      bridge        = "br-bgp"
+      leaf_asn      = 65002
+      client_prefix = "172.20.10.0/24"
     })
-    leaf1 = templatefile("${path.module}/bird/leaf1.conf.tftpl", {})
-    leaf2 = templatefile("${path.module}/bird/leaf2.conf.tftpl", {})
+    leaf1 = templatefile("${path.module}/bird/leaf1.conf.tftpl", { numbered = local.numbered })
+    leaf2 = templatefile("${path.module}/bird/leaf2.conf.tftpl", { numbered = local.numbered })
     spine = templatefile("${path.module}/bird/spine.conf.tftpl", {})
   }
 }
@@ -109,6 +137,12 @@ resource "lxd_network" "lab" {
   )
 }
 
+# Cloud-init runs only at first boot. Recreate guests when the peering mode
+# changes rather than leaving running guests with stale addressing/templates.
+resource "terraform_data" "peering_mode" {
+  triggers_replace = [var.bgp_peering_mode]
+}
+
 resource "lxd_instance" "node" {
   for_each = local.nodes
 
@@ -116,6 +150,10 @@ resource "lxd_instance" "node" {
   type     = each.value.type
   image    = var.image_alias
   profiles = []
+
+  lifecycle {
+    replace_triggered_by = [terraform_data.peering_mode]
+  }
 
   config = merge({
     "limits.cpu"                = each.value.cpu
@@ -167,6 +205,7 @@ resource "lxd_instance" "node" {
 resource "terraform_data" "deploy" {
   triggers_replace = [
     var.name_prefix,
+    var.bgp_peering_mode,
     var.neutron_package_version,
     var.regress_stack_commit,
     filesha256("${path.module}/deploy.sh"),
@@ -185,6 +224,7 @@ resource "terraform_data" "deploy" {
     command = "bash \"${path.module}/deploy.sh\""
 
     environment = {
+      BGP_PEERING_MODE  = var.bgp_peering_mode
       NAME_PREFIX       = var.name_prefix
       REGRESS_STACK_SHA = var.regress_stack_commit
       NEUTRON_VERSION   = var.neutron_package_version
