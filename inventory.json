@@ -2,9 +2,24 @@
   "schema": 1,
   "profile": "hyperconverged",
   "controllers": [
-    {"name": "nbgp-hc1", "address": "10.246.20.11", "management_interface": "enp6s0", "provider_interface": "enp7s0"},
-    {"name": "nbgp-hc2", "address": "10.246.20.12", "management_interface": "enp6s0", "provider_interface": "enp7s0"},
-    {"name": "nbgp-hc3", "address": "10.246.20.13", "management_interface": "enp6s0", "provider_interface": "enp7s0"}
+    {
+      "name": "nbgp-hc1",
+      "address": "10.246.20.11",
+      "management_interface": "enp6s0",
+      "provider_bridge": "br-interconnect"
+    },
+    {
+      "name": "nbgp-hc2",
+      "address": "10.246.20.12",
+      "management_interface": "enp6s0",
+      "provider_bridge": "br-interconnect"
+    },
+    {
+      "name": "nbgp-hc3",
+      "address": "10.246.20.13",
+      "management_interface": "enp6s0",
+      "provider_bridge": "br-interconnect"
+    }
   ],
   "computes": [],
   "api_address": "10.246.20.10",

@@ -16,7 +16,6 @@ locals {
       dhcp_range = "10.246.20.100-10.246.20.200"
     }
     client      = { name = "${var.name_prefix}-client", ipv4 = "none", nat = "false" }
-    physnet     = { name = "${var.name_prefix}-physnet", ipv4 = "none", nat = "false" }
     leaf1_hosts = { name = "${var.name_prefix}-l1-hosts", ipv4 = "none", nat = "false" }
     leaf2_hosts = { name = "${var.name_prefix}-l2-hosts", ipv4 = "none", nat = "false" }
     spine_leaf1 = { name = "${var.name_prefix}-l1-spine", ipv4 = "none", nat = "false" }
@@ -27,24 +26,21 @@ locals {
     hc1 = {
       type = "virtual-machine", role = "hc", mgmt = 11, cpu = "4", memory = "10GB", disk = "60GiB"
       interfaces = {
-        bgp      = { network = "leaf1_hosts", ifname = "enp5s0", addresses = [], routes = [] }
-        provider = { network = "physnet", ifname = "enp7s0", addresses = [], routes = [] }
+        bgp = { network = "leaf1_hosts", ifname = "enp5s0", addresses = [], routes = [] }
       }
       asn = 65101
     }
     hc2 = {
       type = "virtual-machine", role = "hc", mgmt = 12, cpu = "4", memory = "10GB", disk = "60GiB"
       interfaces = {
-        bgp      = { network = "leaf1_hosts", ifname = "enp5s0", addresses = [], routes = [] }
-        provider = { network = "physnet", ifname = "enp7s0", addresses = [], routes = [] }
+        bgp = { network = "leaf1_hosts", ifname = "enp5s0", addresses = [], routes = [] }
       }
       asn = 65102
     }
     hc3 = {
       type = "virtual-machine", role = "hc", mgmt = 13, cpu = "4", memory = "10GB", disk = "60GiB"
       interfaces = {
-        bgp      = { network = "leaf2_hosts", ifname = "enp5s0", addresses = [], routes = [] }
-        provider = { network = "physnet", ifname = "enp7s0", addresses = [], routes = [] }
+        bgp = { network = "leaf2_hosts", ifname = "enp5s0", addresses = [], routes = [] }
       }
       asn = 65103
     }
@@ -138,9 +134,9 @@ resource "lxd_network" "lab" {
 }
 
 # Cloud-init runs only at first boot. Recreate guests when the peering mode
-# changes rather than leaving running guests with stale addressing/templates.
+# or inventory changes rather than leaving stale guest configuration.
 resource "terraform_data" "peering_mode" {
-  triggers_replace = [var.bgp_peering_mode]
+  triggers_replace = [var.bgp_peering_mode, filesha256("${path.module}/inventory.json")]
 }
 
 resource "lxd_instance" "node" {
@@ -211,6 +207,7 @@ resource "terraform_data" "deploy" {
     filesha256("${path.module}/deploy.sh"),
     filesha256("${path.module}/main.tf"),
     filesha256("${path.module}/inventory.json"),
+    filesha256("${path.module}/patches/local-provider-bridge.patch"),
     sha256(join("", [
       for template in sort(fileset(path.module, "bird/*.tftpl")) :
       filesha256("${path.module}/${template}")

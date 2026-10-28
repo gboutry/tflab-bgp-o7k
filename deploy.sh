@@ -7,6 +7,7 @@ case "$BGP_PEERING_MODE" in
     *) echo "Invalid BGP_PEERING_MODE: $BGP_PEERING_MODE" >&2; exit 1 ;;
 esac
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PREFIX=$NAME_PREFIX
 REVISION=$REGRESS_STACK_SHA
 TMP_DIR="$(mktemp -d /tmp/nbgp-deploy.XXXXXX)"
@@ -82,7 +83,8 @@ for node in hc1 hc2 hc3 leaf1 leaf2 spine container1; do
     remote "$node" cloud-init status --wait >/dev/null
 done
 
-log "Building regress-stack from PR 96 commit $REVISION"
+log "Building regress-stack from PR 96 commit $REVISION with local interconnect support"
+lxc file push --uid 0 --gid 0 --mode 0644 "$SCRIPT_DIR/patches/local-provider-bridge.patch" "$HC1/run/regress-stack-local-provider.patch"
 remote_script hc1 "$REVISION" <<'REMOTE'
 set -Eeuo pipefail
 revision=$1
@@ -98,8 +100,10 @@ if [ ! -d "$source_dir/.git" ]; then
         https://github.com/canonical/regress-stack.git "$source_dir"
 fi
 runuser -u ubuntu -- git -C "$source_dir" fetch --depth=1 origin "$revision"
-runuser -u ubuntu -- git -C "$source_dir" checkout --detach "$revision"
+runuser -u ubuntu -- git -C "$source_dir" checkout --force --detach "$revision"
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
+runuser -u ubuntu -- git -C "$source_dir" apply --check /run/regress-stack-local-provider.patch
+runuser -u ubuntu -- git -C "$source_dir" apply /run/regress-stack-local-provider.patch
 runuser -u ubuntu -- bash -c \
     'cd /home/ubuntu/regress-stack-pr96 && dpkg-buildpackage -b -uc -us'
 REMOTE
@@ -260,8 +264,8 @@ for node in hc1 hc2 hc3; do
     wait_for "$PREFIX-$node BIRD" remote "$node" bash -lc 'birdc show protocols | grep -E "leaf.*BGP.*up"'
     mapping=$(remote "$node" ovs-vsctl get Open_vSwitch . external-ids:ovn-bridge-mappings | tr -d '"')
     case ",$mapping," in
-        *,physnet1:br-ex,*) ;;
-        *) echo "$PREFIX-$node is missing physnet1:br-ex mapping: $mapping" >&2; exit 1 ;;
+        *,physnet1:br-interconnect,*) ;;
+        *) echo "$PREFIX-$node is missing physnet1:br-interconnect mapping: $mapping" >&2; exit 1 ;;
     esac
     case ",$mapping," in
         *,br-bgp:br-bgp,*) ;;

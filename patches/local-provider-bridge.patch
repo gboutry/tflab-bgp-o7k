@@ -1,0 +1,204 @@
+--- a/src/regress_stack/core/deployment.py
++++ b/src/regress_stack/core/deployment.py
+@@ -41,15 +41,23 @@
+     name: str
+     address: str
+     management_interface: str
+-    provider_interface: str
++    provider_interface: Optional[str] = None
++    provider_bridge: str = "br-ex"
+ 
+     def __post_init__(self):
+         if not isinstance(self.name, str) or not _NAME.fullmatch(self.name):
+             raise ValueError("Node names must be lowercase DNS labels")
+         _ipv4(self.address)
+-        for interface in (self.management_interface, self.provider_interface):
++        interfaces = (self.management_interface, self.provider_bridge)
++        if self.provider_interface is not None:
++            interfaces += (self.provider_interface,)
++        for interface in interfaces:
+             if not isinstance(interface, str) or not _INTERFACE.fullmatch(interface):
+                 raise ValueError("Invalid interface name")
++        if self.management_interface == self.provider_bridge:
++            raise ValueError(
++                "Provider bridge and management interface must be distinct"
++            )
+         if self.management_interface == self.provider_interface:
+             raise ValueError("Provider and management interfaces must be distinct")
+ 
+--- a/src/regress_stack/multinode/networking.py
++++ b/src/regress_stack/multinode/networking.py
+@@ -71,7 +71,7 @@
+             "external_ids:ovn-encap-type=geneve",
+             f"external_ids:ovn-encap-ip={context.local.address}",
+             f"external_ids:ovn-remote={connections(context, 6642)}",
+-            "external_ids:ovn-bridge-mappings=physnet1:br-ex",
++            f"external_ids:ovn-bridge-mappings=physnet1:{context.local.provider_bridge}",
+             *(
+                 ["external_ids:ovn-cms-options=enable-chassis-as-gw"]
+                 if context.controller
+@@ -89,12 +89,18 @@
+         [
+             "--may-exist",
+             "add-br",
+-            "br-ex",
+-            "--",
+-            "--may-exist",
+-            "add-port",
+-            "br-ex",
+-            context.local.provider_interface,
++            context.local.provider_bridge,
++            *(
++                [
++                    "--",
++                    "--may-exist",
++                    "add-port",
++                    context.local.provider_bridge,
++                    context.local.provider_interface,
++                ]
++                if context.local.provider_interface is not None
++                else []
++            ),
+         ],
+     )
+     provider_links()
+@@ -103,6 +109,11 @@
+ 
+ def provider_links() -> None:
+     context = common.context()
++    uplink = (
++        f"ExecStart=/usr/sbin/ip link set {context.local.provider_interface} up\n"
++        if context.local.provider_interface is not None
++        else ""
++    )
+     common.write(
+         "/etc/systemd/system/regress-stack-provider.service",
+         f"""[Unit]
+@@ -114,9 +125,8 @@
+ [Service]
+ Type=oneshot
+ RemainAfterExit=yes
+-ExecStart=/usr/sbin/ip link set br-ex up
+-ExecStart=/usr/sbin/ip link set {context.local.provider_interface} up
+-
++ExecStart=/usr/sbin/ip link set {context.local.provider_bridge} up
++{uplink}
+ [Install]
+ WantedBy=multi-user.target
+ """,
+--- a/src/regress_stack/multinode/setup.py
++++ b/src/regress_stack/multinode/setup.py
+@@ -80,9 +80,8 @@
+     )
+     by_name = {interface["ifname"]: interface for interface in interfaces}
+     local = context.local
+-    if (
+-        local.management_interface not in by_name
+-        or local.provider_interface not in by_name
++    if local.management_interface not in by_name or (
++        local.provider_interface is not None and local.provider_interface not in by_name
+     ):
+         raise RuntimeError("An inventory interface is missing on this VM")
+     addresses = {
+@@ -92,7 +91,7 @@
+         raise RuntimeError(
+             "Management address is not assigned to the inventory interface"
+         )
+-    if any(
++    if local.provider_interface is not None and any(
+         entry.get("scope") == "global"
+         for entry in by_name[local.provider_interface]["addr_info"]
+     ):
+--- a/tests/multinode/test_recipes.py
++++ b/tests/multinode/test_recipes.py
+@@ -1,6 +1,7 @@
+ # Copyright 2026 - Canonical Ltd
+ # SPDX-License-Identifier: GPL-3.0-only
+ 
++import dataclasses
+ import json
+ import subprocess
+ from unittest.mock import Mock
+@@ -510,3 +511,42 @@
+     with activate(context):
+         services.prepare("keystone")
+     run.assert_any_call("systemctl", ["start", "memcached"])
++
++
++def test_local_provider_bridge_without_uplink(context, monkeypatch):
++    node = dataclasses.replace(
++        context.local, provider_interface=None, provider_bridge="br-interconnect"
++    )
++    deployment = dataclasses.replace(
++        context.deployment, controllers=(node, *context.deployment.controllers[1:])
++    )
++    context = dataclasses.replace(context, deployment=deployment)
++    run = Mock()
++    write = Mock()
++    monkeypatch.setattr(common, "run", run)
++    monkeypatch.setattr(common, "write", write)
++    monkeypatch.setattr(common, "restart", Mock())
++    monkeypatch.setattr(common, "done", lambda _: True)
++    with activate(context):
++        networking.setup()
++    run.assert_any_call("ovs-vsctl", ["--may-exist", "add-br", "br-interconnect"])
++    settings = next(
++        call.args[1]
++        for call in run.call_args_list
++        if call.args[0] == "ovs-vsctl" and call.args[1][0] == "set"
++    )
++    assert "external_ids:ovn-bridge-mappings=physnet1:br-interconnect" in settings
++    assert not any("add-port" in call.args[1] for call in run.call_args_list)
++    unit = write.call_args.args[1]
++    assert "ExecStart=/usr/sbin/ip link set br-interconnect up" in unit
++    assert unit.count("ExecStart=") == 1
++    assert "br-ex" not in unit
++
++
++def test_local_provider_bridge_name_is_validated():
++    from regress_stack.core.deployment import Node
++
++    with pytest.raises(ValueError, match="Invalid interface name"):
++        Node("node1", "192.0.2.1", "ens3", provider_bridge="invalid;bridge")
++    with pytest.raises(ValueError, match="must be distinct"):
++        Node("node1", "192.0.2.1", "ens3", provider_bridge="ens3")
+--- a/tests/multinode/test_cli.py
++++ b/tests/multinode/test_cli.py
+@@ -166,3 +166,37 @@
+     setup.local_preflight(context)
+ 
+     packages.assert_called_once_with(context)
++
++
++def test_preflight_allows_local_provider_bridge(context, tmp_path, monkeypatch):
++    import dataclasses
++
++    node = dataclasses.replace(
++        context.local, provider_interface=None, provider_bridge="br-interconnect"
++    )
++    deployment = dataclasses.replace(
++        context.deployment, controllers=(node, *context.deployment.controllers[1:])
++    )
++    context = dataclasses.replace(context, deployment=deployment)
++    monkeypatch.setattr(setup.os, "geteuid", lambda: 0)
++    monkeypatch.setattr(setup.socket, "gethostname", lambda: node.name)
++    monkeypatch.setattr(setup, "LOCAL_STATE", tmp_path / "context.json")
++    monkeypatch.setattr(setup.utils, "REGRESS_STACK_DIR", tmp_path)
++    monkeypatch.setattr(
++        setup.common,
++        "run",
++        Mock(
++            return_value=json.dumps(
++                [
++                    {
++                        "ifname": node.management_interface,
++                        "addr_info": [{"local": node.address, "scope": "global"}],
++                    }
++                ]
++            )
++        ),
++    )
++    packages = Mock(return_value=[])
++    monkeypatch.setattr(setup.profiles, "execution_order", packages)
++    setup.local_preflight(context)
++    packages.assert_called_once_with(context)

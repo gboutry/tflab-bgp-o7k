@@ -20,16 +20,15 @@ flowchart TB
   L1 ---|BGP L2| H1[HC1<br/>AS65101]
   L1 ---|BGP L2| H2[HC2<br/>AS65102]
   L2 ---|BGP L2| H3[HC3<br/>AS65103]
-  P[flat physnet L2] ---|enp7s0 / br-ex| H1
-  P ---|enp7s0 / br-ex| H2
-  P ---|enp7s0 / br-ex| H3
 ```
 
 Leaf1 is the ToR for HC1 and HC2; Leaf2 is the ToR for HC3. There is no ToR
 above the spine. On each HC, `enp5s0` is the routed BGP link on `br-bgp`,
-`enp6s0` is management, and `enp7s0` is the provider link on `br-ex`.
-Container1 reaches the FIP subnet through Leaf1 and has no L2 attachment to
-the provider or HC networks.
+`enp6s0` is management. Each HC has a local `br-interconnect` OVS bridge
+mapped as `physnet1:br-interconnect`, with no physical uplink or shared
+provider L2. It forwards packets between OVN patch ports; the physical
+ToR uplink is `enp5s0` on `br-bgp`. Container1 reaches the FIP subnet through
+Leaf1 and has no L2 attachment to the HC networks.
 
 | Nodes | LXD type | CPU / RAM each |
 |---|---|---:|
@@ -51,7 +50,13 @@ The lab uses Resolute packages and pins Neutron to
 `2:28.0.2-0ubuntu1` from `resolute-proposed`. The deployer builds
 `python3-regress-stack` from the pinned PR commit on HC1, installs that same
 package on all HCs, then uses the PR's `packages`, `setup`, and `ready`
-commands. It does not depend on a local checkout of regress-stack.
+commands. It does not depend on a local checkout of regress-stack. The build applies
+[`patches/local-provider-bridge.patch`](patches/local-provider-bridge.patch)
+to the pinned revision. This adds an optional provider interface and a
+configurable provider bridge, preserving the upstream defaults. The lab
+inventory selects `br-interconnect` and omits the provider interface. The
+patch includes regression tests and is reapplied to a clean checkout on
+build retries. It does not change Neutron's BGP implementation.
 
 ## Deploy
 
@@ -110,7 +115,9 @@ ASNs, provider network, and workload addressing stay the same.
 Run `terraform plan -out=lab.tfplan`, review it, then
 `terraform apply lab.tfplan`. Changing the mode **replaces all seven lab
 instances**, including their OpenStack state and any locally installed fix.
-The LXD networks remain. This is deliberate: cloud-init templates do not
+The LXD networks remain when switching modes. Applying the local-interconnect
+commit to an older lab also replaces all guests and removes its provider
+network. This is deliberate: cloud-init templates do not
 reconfigure existing guests on an in-place update. In-place switching is
 not implemented. To switch back, set the variable to `"unnumbered"` and
 plan/apply again.
@@ -130,7 +137,7 @@ Local configuration checks (Terraform >= 1.7 for provider mocks):
 ```sh
 terraform fmt -check
 terraform validate
-terraform test
+terraform test -var=bgp_peering_mode=unnumbered
 python3 -m unittest discover -s tests
 bash -n deploy.sh
 shellcheck deploy.sh
@@ -142,7 +149,7 @@ route and ping checks in `deploy.sh` against a deployed lab.
 
 ## What apply configures
 
-1. Terraform creates the seven isolated LXD bridges and seven instances.
+1. Terraform creates the six isolated LXD bridges and seven instances.
    Only management has NAT. Leaf1/Leaf2/Spine run BIRD; the three HCs stage
    their BIRD templates but keep BIRD stopped until the OVN BGP agent is ready.
 2. The harness builds regress-stack from the pinned PR 96 commit, installs
@@ -154,7 +161,8 @@ route and ping checks in `deploy.sh` against a deployed lab.
    OVN BGP agent systemd unit and extension, runs the Neutron DB migration,
    and starts the agent and BIRD. The agent reconciles BGP metadata,
    `dynamic-routing-port-mapping`, patch ports, and local OpenFlow. The
-   provider NIC remains on `br-ex` with `physnet1:br-ex` mapping.
+   local interconnect is mapped as `physnet1:br-interconnect`; it has no
+   physical provider NIC.
 4. It creates flat external network `external-network` on `physnet1`, subnet
    `172.20.20.0/24`, overlay `bgp-overlay` (`10.244.0.0/24`), a router, and
    three Cirros guests pinned one per HC, each with a fixed floating IP.

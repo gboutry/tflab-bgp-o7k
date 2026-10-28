@@ -62,7 +62,7 @@ run "ipv4_numbered" {
   }
 
   assert {
-    condition     = terraform_data.peering_mode.triggers_replace == ["ipv4-numbered"]
+    condition     = terraform_data.peering_mode.triggers_replace == ["ipv4-numbered", filesha256("${path.module}/inventory.json")]
     error_message = "Mode changes must trigger guest replacement."
   }
 }
@@ -73,4 +73,24 @@ run "reject_invalid_mode" {
     bgp_peering_mode = "numberd"
   }
   expect_failures = [var.bgp_peering_mode]
+}
+
+run "local_interconnect" {
+  command = plan
+
+  assert {
+    condition = !contains(keys(local.networks), "physnet") && alltrue([
+      for node in ["hc1", "hc2", "hc3"] :
+      keys(local.nodes[node].interfaces) == ["bgp"]
+    ])
+    error_message = "Chassis must have only BGP and management NICs, with no provider L2."
+  }
+
+  assert {
+    condition = alltrue([
+      for node in jsondecode(local.inventory_json).controllers :
+      node.provider_bridge == "br-interconnect" && !can(node.provider_interface)
+    ])
+    error_message = "The inventory must select a local interconnect without a provider NIC."
+  }
 }
