@@ -28,10 +28,15 @@ variable "neutron_package_version" {
   default     = "2:28.0.2-0ubuntu1"
 }
 
-variable "regress_stack_commit" {
-  description = "Immutable regress-stack PR 96 source revision used by the lab deployer."
+variable "regress_stack_package" {
+  description = "Path to the prebuilt regress-stack package with multinode and local provider bridge support."
   type        = string
-  default     = "a37016f35b4fc67701a9c9edee44baa500c33d99"
+  default     = "regress-stack.deb"
+
+  validation {
+    condition     = fileexists(var.regress_stack_package)
+    error_message = "Set regress_stack_package to an existing prebuilt .deb file."
+  }
 }
 
 variable "bgp_peering_mode" {

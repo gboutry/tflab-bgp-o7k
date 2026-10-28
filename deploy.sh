@@ -7,9 +7,12 @@ case "$BGP_PEERING_MODE" in
     *) echo "Invalid BGP_PEERING_MODE: $BGP_PEERING_MODE" >&2; exit 1 ;;
 esac
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PREFIX=$NAME_PREFIX
-REVISION=$REGRESS_STACK_SHA
+REGRESS_STACK_DEB=${REGRESS_STACK_DEB:-regress-stack.deb}
+if [[ ! -r "$REGRESS_STACK_DEB" ]]; then
+    echo "Cannot read prebuilt regress-stack package: $REGRESS_STACK_DEB" >&2
+    exit 1
+fi
 TMP_DIR="$(mktemp -d /tmp/nbgp-deploy.XXXXXX)"
 chmod 0700 "$TMP_DIR"
 mkdir -m 0700 "$TMP_DIR/preseeds"
@@ -84,49 +87,19 @@ for node in hc1 hc2 hc3 leaf1 leaf2 spine container1; do
     remote "$node" cloud-init status --wait >/dev/null
 done
 
-log "Building regress-stack from PR 96 commit $REVISION with local interconnect support"
-lxc file push --uid 0 --gid 0 --mode 0644 "$SCRIPT_DIR/patches/local-provider-bridge.patch" "$HC1/run/regress-stack-local-provider.patch"
-remote_script hc1 "$REVISION" <<'REMOTE'
-set -Eeuo pipefail
-revision=$1
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends \
-    build-essential debhelper dh-python dpkg-dev fakeroot git \
-    pybuild-plugin-pyproject python3-all python3-apt python3-click \
-    python3-networkx python3-openstackclient python3-pyroute2 python3-pytest
-source_dir=/home/ubuntu/regress-stack-pr96
-if [ ! -d "$source_dir/.git" ]; then
-    runuser -u ubuntu -- git clone --filter=blob:none --no-checkout \
-        https://github.com/canonical/regress-stack.git "$source_dir"
-fi
-runuser -u ubuntu -- git -C "$source_dir" fetch --depth=1 origin "$revision"
-runuser -u ubuntu -- git -C "$source_dir" checkout --force --detach "$revision"
-test "$(runuser -u ubuntu -- git -C "$source_dir" rev-parse HEAD)" = "$revision"
-runuser -u ubuntu -- git -C "$source_dir" apply --check /run/regress-stack-local-provider.patch
-runuser -u ubuntu -- git -C "$source_dir" apply /run/regress-stack-local-provider.patch
-runuser -u ubuntu -- bash -c \
-    'cd /home/ubuntu/regress-stack-pr96 && dpkg-buildpackage -b -uc -us'
-REMOTE
-
-package_path="$(lxc exec --mode=non-interactive "$HC1" -- bash -lc \
-    "find /home/ubuntu -maxdepth 1 -type f -name 'python3-regress-stack_*_all.deb' -print -quit")"
-test -n "$package_path"
-lxc file pull "$HC1$package_path" "$TMP_DIR/python3-regress-stack.deb"
-
-log "Installing the pinned regress-stack package and role packages"
+log "Installing the prebuilt regress-stack package and Ubuntu role packages"
 for node in hc1 hc2 hc3; do
     instance="$PREFIX-$node"
     lxc file push "$TMP_DIR/inventory.json" "$instance/root/inventory.json"
-    lxc file push "$TMP_DIR/python3-regress-stack.deb" "$instance/tmp/python3-regress-stack.deb"
+    lxc file push --uid 0 --gid 0 --mode 0644 "$REGRESS_STACK_DEB" "$instance/run/python3-regress-stack.deb"
     remote_script "$node" "$instance" "$NEUTRON_VERSION" <<'REMOTE'
 set -Eeuo pipefail
 node=$1
 neutron_version=$2
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y /tmp/python3-regress-stack.deb
-rm -f /tmp/python3-regress-stack.deb
+apt-get install -y /run/python3-regress-stack.deb
+rm -f /run/python3-regress-stack.deb
 chmod 0600 /root/inventory.json
 packages=$(regress-stack packages --inventory /root/inventory.json --node "$node")
 test -n "$packages"

@@ -2,6 +2,11 @@
 # Requires Terraform >= 1.7. No instances or provisioners are run.
 mock_provider "lxd" {}
 
+variables {
+  # Planning tests do not install the package; use a readable fixture path.
+  regress_stack_package = "README.md"
+}
+
 run "default_unnumbered" {
   command = plan
 

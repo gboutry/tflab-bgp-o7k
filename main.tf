@@ -206,11 +206,10 @@ resource "terraform_data" "deploy" {
     var.name_prefix,
     var.bgp_peering_mode,
     var.neutron_package_version,
-    var.regress_stack_commit,
+    filesha256(var.regress_stack_package),
     filesha256("${path.module}/deploy.sh"),
     filesha256("${path.module}/main.tf"),
     filesha256("${path.module}/inventory.json"),
-    filesha256("${path.module}/patches/local-provider-bridge.patch"),
     sha256(join("", [
       for template in sort(fileset(path.module, "bird/*.tftpl")) :
       filesha256("${path.module}/${template}")
@@ -226,7 +225,7 @@ resource "terraform_data" "deploy" {
     environment = {
       BGP_PEERING_MODE  = var.bgp_peering_mode
       NAME_PREFIX       = var.name_prefix
-      REGRESS_STACK_SHA = var.regress_stack_commit
+      REGRESS_STACK_DEB = abspath(var.regress_stack_package)
       NEUTRON_VERSION   = var.neutron_package_version
       INVENTORY_JSON    = local.inventory_json
     }

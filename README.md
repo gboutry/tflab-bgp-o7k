@@ -6,11 +6,14 @@ bootstraps regress-stack on three hyperconverged VMs, configures Neutron's
 native OVN BGP plugin and agent, creates three overlay VMs with floating IPs,
 and verifies pings from a client container on a separate L2.
 
-The regress-stack source is pinned to the current head of [PR 96](https://github.com/canonical/regress-stack/pull/96):
-`a37016f35b4fc67701a9c9edee44baa500c33d99`. The PR provides the
-inventory-driven three-node hyperconverged profile and private preseed
-workflow; the Terraform local-exec harness provisions VMs and transfers
-preseeds because the PR intentionally leaves VM orchestration to its caller.
+The lab uses a prebuilt regress-stack package with the inventory-driven
+three-node hyperconverged profile and private preseed workflow. The verified
+package was built from [PR 96](https://github.com/canonical/regress-stack/pull/96)
+revision `a37016f35b4fc67701a9c9edee44baa500c33d99` plus
+[`patches/local-provider-bridge.patch`](patches/local-provider-bridge.patch).
+The archive's regress-stack 0.2 package lacks that multinode CLI. The lab
+never builds software during deployment; OpenStack services use Ubuntu
+archive packages.
 
 ```mermaid
 flowchart TB
@@ -47,16 +50,19 @@ Leaf1 and has no L2 attachment to the HC networks.
   of the BGP acceptance test.
 
 The lab uses Resolute packages and pins Neutron to
-`2:28.0.2-0ubuntu1` from `resolute-updates`. The deployer builds
-`python3-regress-stack` from the pinned PR commit on HC1, installs that same
-package on all HCs, then uses the PR's `packages`, `setup`, and `ready`
-commands. It does not depend on a local checkout of regress-stack. The build applies
-[`patches/local-provider-bridge.patch`](patches/local-provider-bridge.patch)
-to the pinned revision. This adds an optional provider interface and a
-configurable provider bridge, preserving the upstream defaults. The lab
-inventory selects `br-interconnect` and omits the provider interface. The
-patch includes regression tests and is reapplied to a clean checkout on
-build retries. It does not change Neutron's BGP implementation.
+`2:28.0.2-0ubuntu1` from `resolute-updates`. No proposed pocket is enabled.
+Provide the prebuilt `python3-regress-stack` package separately, then set its
+path in `terraform.tfvars`:
+
+```hcl
+regress_stack_package = "/absolute/path/python3-regress-stack_0.3.0_all.deb"
+```
+
+The supplied package must support the multinode CLI and the inventory's
+local `br-interconnect` without a provider interface. The tracked patch
+records the change used by the verified package. Terraform tracks the
+package checksum and the deployer installs the same file on all HCs. It
+does not fetch source, build a package, or rerun its build tests.
 
 ## Deploy
 
@@ -152,8 +158,8 @@ route and ping checks in `deploy.sh` against a deployed lab.
 1. Terraform creates the six isolated LXD bridges and seven instances.
    Only management has NAT. Leaf1/Leaf2/Spine run BIRD; the three HCs stage
    their BIRD templates but keep BIRD stopped until the OVN BGP agent is ready.
-2. The harness builds regress-stack from the pinned PR 96 commit, installs
-   the Debian package and each inventory role's package list, then bootstraps
+2. The harness installs the supplied regress-stack package and each
+   inventory role's Ubuntu package list, then bootstraps
    HC1 and joins HC2/HC3 with private preseeds. It waits for `regress-stack
    ready`.
 3. It enables Neutron's `ovn-bgp` service plugin with main-router table 42 and
