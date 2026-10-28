@@ -80,6 +80,7 @@ command -v lxc >/dev/null
 lxc info >/dev/null
 log "Waiting for cloud-init on all guests"
 for node in hc1 hc2 hc3 leaf1 leaf2 spine container1; do
+    wait_for "$PREFIX-$node LXD agent" remote "$node" true
     remote "$node" cloud-init status --wait >/dev/null
 done
 
@@ -101,7 +102,7 @@ if [ ! -d "$source_dir/.git" ]; then
 fi
 runuser -u ubuntu -- git -C "$source_dir" fetch --depth=1 origin "$revision"
 runuser -u ubuntu -- git -C "$source_dir" checkout --force --detach "$revision"
-test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
+test "$(runuser -u ubuntu -- git -C "$source_dir" rev-parse HEAD)" = "$revision"
 runuser -u ubuntu -- git -C "$source_dir" apply --check /run/regress-stack-local-provider.patch
 runuser -u ubuntu -- git -C "$source_dir" apply /run/regress-stack-local-provider.patch
 runuser -u ubuntu -- bash -c \
@@ -145,7 +146,7 @@ chmod 0755 "$policy"
 apt-get install -y --no-install-recommends $packages
 restore_policy
 trap - EXIT
-candidate=$(apt-cache policy neutron-server | awk '/Candidate:/ {print $2; exit}')
+candidate=$(apt-cache policy neutron-server | awk '/Candidate:/ {print $2}')
 if [ "$candidate" != "$neutron_version" ]; then
     echo "Expected neutron-server $neutron_version; archive candidate is $candidate" >&2
     exit 1

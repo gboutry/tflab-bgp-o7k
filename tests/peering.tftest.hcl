@@ -94,3 +94,18 @@ run "local_interconnect" {
     error_message = "The inventory must select a local interconnect without a provider NIC."
   }
 }
+
+run "valid_cloud_init_sections" {
+  command = plan
+
+  assert {
+    condition = (
+      !can(yamldecode(lxd_instance.node["hc1"].config["cloud-init.user-data"]).users) &&
+      !can(yamldecode(lxd_instance.node["container1"].config["cloud-init.user-data"]).runcmd) &&
+      !can(yamldecode(lxd_instance.node["container1"].config["cloud-init.user-data"]).write_files) &&
+      length(yamldecode(lxd_instance.node["hc1"].config["cloud-init.user-data"]).runcmd) > 0 &&
+      length(yamldecode(lxd_instance.node["hc1"].config["cloud-init.user-data"]).write_files) > 0
+    )
+    error_message = "Omit empty cloud-init sections so the default user and chassis setup remain available."
+  }
+}

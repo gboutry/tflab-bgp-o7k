@@ -152,9 +152,12 @@ resource "lxd_instance" "node" {
   }
 
   config = merge({
-    "limits.cpu"                = each.value.cpu
-    "limits.memory"             = each.value.memory
-    "cloud-init.user-data"      = "#cloud-config\n${yamlencode(local.user_data[each.key])}"
+    "limits.cpu"    = each.value.cpu
+    "limits.memory" = each.value.memory
+    "cloud-init.user-data" = "#cloud-config\n${yamlencode({
+      for key, value in local.user_data[each.key] : key => value
+      if contains(["runcmd", "write_files", "users"], key) ? length(value) > 0 : true
+    })}"
     "cloud-init.network-config" = yamlencode(local.network_config[each.key])
   })
 
