@@ -1,8 +1,9 @@
 # Turnkey Neutron OVN BGP lab on local LXD
 
 This Terraform project creates and deploys an isolated Ubuntu 26.04 LXD lab.
-One `terraform apply` builds the routed spine/leaf network, installs and
-bootstraps regress-stack on three hyperconverged VMs, configures Neutron's
+One `terraform apply` builds the routed spine/leaf network, selects the
+signed Hibiscus UCA, installs the complete source OVN runtime before first
+bootstrap, and bootstraps regress-stack on three hyperconverged VMs, configures Neutron's
 native OVN BGP plugin and agent, creates three overlay VMs with floating IPs,
 and verifies pings from a client container on a separate L2.
 
@@ -10,10 +11,11 @@ The lab uses a prebuilt regress-stack package with the inventory-driven
 three-node hyperconverged profile and private preseed workflow. The verified
 package was built from [PR 96](https://github.com/canonical/regress-stack/pull/96)
 revision `a37016f35b4fc67701a9c9edee44baa500c33d99` plus
-[`patches/local-provider-bridge.patch`](patches/local-provider-bridge.patch).
-The archive's regress-stack 0.2 package lacks that multinode CLI. The lab
-never builds software during deployment; OpenStack services use Ubuntu
-archive packages.
+[`patches/local-provider-bridge.patch`](patches/local-provider-bridge.patch) and
+[`patches/hibiscus-bootstrap.patch`](patches/hibiscus-bootstrap.patch).
+The archive's regress-stack 0.2 package lacks that multinode CLI. The lab never builds software during deployment. OpenStack and OVS services
+use signed Hibiscus UCA packages; OVN programs, schemas and scripts come
+from a separately built and verified native installation archive.
 
 ```mermaid
 flowchart TB
@@ -46,16 +48,18 @@ Leaf1 and has no L2 attachment to the HC networks.
 - Terraform 1.6 or newer, internet access from the host and guests, and an
   LXD storage pool named `default` (or override `storage_pool`).
 - Sufficient capacity for three 4-vCPU/10-GB guests plus the containers.
-  Nested KVM is enabled by LXD; Nova workload launch inside the HCs is not part
-  of the BGP acceptance test.
+  Nested KVM is enabled by LXD and is required for the Nova workload
+  acceptance checks.
 
-The lab uses Resolute packages and pins Neutron to
-`2:28.0.2-0ubuntu1` from `resolute-updates`. No proposed pocket is enabled.
+The lab uses Ubuntu Resolute with signed `resolute-updates/hibiscus`,
+including Neutron `2:29.0.0-0ubuntu1~cloud0`. No proposed pocket is enabled.
 Provide the prebuilt `python3-regress-stack` package separately, then set its
 path in `terraform.tfvars`:
 
 ```hcl
-regress_stack_package = "/absolute/path/python3-regress-stack_0.3.0_all.deb"
+regress_stack_package = "/absolute/path/python3-regress-stack_hibiscus_all.deb"
+ovn_runtime_archive  = "/absolute/path/ovn-runtime-a298c1347.tar.gz"
+ovn_runtime_manifest = "/absolute/path/ovn-artifact-manifest.json"
 ```
 
 The supplied package must support the multinode CLI and the inventory's
@@ -114,9 +118,9 @@ ASNs, provider network, and workload addressing stay the same.
 
 | Link | Chassis address on `br-bgp` | ToR address on `eth1` |
 |---|---|---|
-| HC1 → Leaf1 | `172.20.1.11/24` | `172.20.1.1/24` |
-| HC2 → Leaf1 | `172.20.1.12/24` | `172.20.1.1/24` |
-| HC3 → Leaf2 | `172.20.2.13/24` | `172.20.2.1/24` |
+| HC1 → Leaf1 | `172.20.1.11/32` | `172.20.1.1/32` |
+| HC2 → Leaf1 | `172.20.1.12/32` | `172.20.1.1/32` |
+| HC3 → Leaf2 | `172.20.2.13/32` | `172.20.2.1/32` |
 
 Run `terraform plan -out=lab.tfplan`, review it, then
 `terraform apply lab.tfplan`. Changing the mode **replaces all seven lab
@@ -128,15 +132,15 @@ reconfigure existing guests on an in-place update. In-place switching is
 not implemented. To switch back, set the variable to `"unnumbered"` and
 plan/apply again.
 
-Numbered mode is a reproducer for Neutron's numbered BGP integration and
-for testing a fix; it does not include that fix. The deployer still requires
-BGP sessions, table 42 FIP routes, table 10 return routes via the selected
-ToR address, fabric propagation, and client pings. An unfixed Neutron may
-therefore fail the apply. Guests remain available for inspecting and
-installing a fix; re-run `terraform apply` after correcting the failure.
-The deployer retains its pinned Neutron package check on retries, so use a
-matching version when installing a rebuilt package or override
-`neutron_package_version` when deploying a different published version.
+Numbered mode configures /32 addresses on both ends, reciprocal scope-link
+host routes and BIRD `onlink`. Source OVN is installed under a package-service
+start freeze before regress-stack bootstrap. The installer checks every
+native file and symlink against the supplied manifest, preserves UCA files
+through diversions and uses `/var/lib/ovn` for fresh databases. A native
+northd stop override leaves the separately managed DB services running.
+Acceptance verifies executing controller/northd hashes and actual DB paths.
+The Hibiscus-compatible regress-stack package must include the tracked
+`patches/hibiscus-bootstrap.patch` after the local-provider patch.
 
 Local configuration checks (Terraform >= 1.7 for provider mocks):
 
@@ -171,7 +175,8 @@ route and ping checks in `deploy.sh` against a deployed lab.
    physical provider NIC.
 4. It creates flat external network `external-network` on `physnet1`, subnet
    `172.20.20.0/24`, overlay `bgp-overlay` (`10.244.0.0/24`), a router, and
-   three Cirros guests pinned one per HC, each with a fixed floating IP.
+   three Cirros guests pinned one per HC, each with a fixed floating IP, plus
+   a distinct same-host guest without a FIP.
 5. It enables DHCP on the isolated external subnet and restarts
    `neutron-periodic-workers` to resync BGP topology. This supplies the OVN
    `DHCP_Options` router value used by the Neutron plugin when it creates the

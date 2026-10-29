@@ -92,11 +92,28 @@ for node in hc1 hc2 hc3; do
     instance="$PREFIX-$node"
     lxc file push "$TMP_DIR/inventory.json" "$instance/root/inventory.json"
     lxc file push --uid 0 --gid 0 --mode 0644 "$REGRESS_STACK_DEB" "$instance/run/python3-regress-stack.deb"
-    remote_script "$node" "$instance" "$NEUTRON_VERSION" <<'REMOTE'
+    lxc file push "$OVN_RUNTIME_ARCHIVE" "$instance/run/ovn-runtime.tar.gz"
+    lxc file push "$OVN_RUNTIME_MANIFEST" "$instance/run/ovn-runtime-manifest.json"
+    lxc file push "$OVN_INSTALLER" "$instance/run/install-ovn-runtime.py"
+    remote_script "$node" "$instance" "$NEUTRON_VERSION" "$CLOUD_ARCHIVE" \
+        "$OVN_ARCHIVE_SHA256" "$OVN_MANIFEST_SHA256" "$OVN_SOURCE_REVISION" <<'REMOTE'
 set -Eeuo pipefail
 node=$1
 neutron_version=$2
+cloud_archive=$3
+archive_sha=$4
+manifest_sha=$5
+ovn_revision=$6
 export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y ubuntu-cloud-keyring
+cat >/etc/apt/sources.list.d/cloudarchive-hibiscus.sources <<SOURCES
+Types: deb
+URIs: https://ubuntu-cloud.archive.canonical.com/ubuntu
+Suites: resolute-updates/$cloud_archive
+Components: main
+Signed-By: /usr/share/keyrings/ubuntu-cloud-keyring.gpg
+SOURCES
 apt-get update
 apt-get install -y /run/python3-regress-stack.deb
 rm -f /run/python3-regress-stack.deb
@@ -117,6 +134,9 @@ chmod 0755 "$policy"
 # Package names are emitted by regress-stack and word splitting is intentional.
 # shellcheck disable=SC2086
 apt-get install -y --no-install-recommends $packages
+python3 /run/install-ovn-runtime.py /run/ovn-runtime.tar.gz \
+    /run/ovn-runtime-manifest.json "$archive_sha" "$manifest_sha" "$ovn_revision"
+rm -f /run/ovn-runtime.tar.gz /run/ovn-runtime-manifest.json /run/install-ovn-runtime.py
 restore_policy
 trap - EXIT
 candidate=$(apt-cache policy neutron-server | awk '/Candidate:/ {print $2}')
@@ -149,16 +169,41 @@ log "Waiting for regress-stack readiness"
 wait_for "regress-stack ready" remote hc1 regress-stack ready
 remote hc1 regress-stack ready
 
+log "Verifying the source OVN runtime and first-boot database paths"
+for node in hc1 hc2 hc3; do
+    remote_script "$node" "$OVN_SOURCE_REVISION" <<'REMOTE'
+set -Eeuo pipefail
+python3 - "$1" <<'PYTHON'
+from pathlib import Path
+import hashlib, json, sys
+manifest = json.loads((Path('/root/ovn-source') / sys.argv[1] / 'manifest.json').read_text())
+expected = {x['path']: x for x in manifest['files']}
+for name in ['ovn-controller', 'ovn-northd']:
+    pid = Path('/run/ovn/' + name + '.pid').read_text().strip()
+    actual = hashlib.sha256(Path('/proc/' + pid + '/exe').read_bytes()).hexdigest()
+    assert actual == expected['usr/bin/' + name]['sha256'], name
+for name in ['ovnnb', 'ovnsb']:
+    pid = Path('/run/ovn/' + name + '_db.pid').read_text().strip()
+    args = Path('/proc/' + pid + '/cmdline').read_bytes().split(b'\0')
+    assert ('/var/lib/ovn/' + name + '_db.db').encode() in args, name
+print('Source OVN runtime and /var/lib/ovn database paths verified')
+PYTHON
+REMOTE
+done
+
 log "Configuring Neutron BGP and persistent peer bridges"
-for item in "hc1 fe80::101 172.20.1.11" "hc2 fe80::102 172.20.1.12" "hc3 fe80::103 172.20.2.13"; do
-    read -r node link_local ipv4 <<<"$item"
+for item in "hc1 fe80::101 172.20.1.11 172.20.1.1" "hc2 fe80::102 172.20.1.12 172.20.1.1" "hc3 fe80::103 172.20.2.13 172.20.2.1"; do
+    read -r node link_local ipv4 peer <<<"$item"
     address_command="/usr/sbin/ip -6 addr replace $link_local/64 dev br-bgp"
+    peer_route_command=""
     if [[ "$BGP_PEERING_MODE" == ipv4-numbered ]]; then
-        address_command="/usr/sbin/ip -4 addr replace $ipv4/24 dev br-bgp"
+        address_command="/usr/sbin/ip -4 addr replace $ipv4/32 dev br-bgp"
+        peer_route_command="ExecStart=/usr/sbin/ip -4 route replace $peer/32 dev br-bgp scope link src $ipv4"
     fi
-    remote_script "$node" "$address_command" <<'REMOTE'
+    remote_script "$node" "$address_command" "$peer_route_command" <<'REMOTE'
 set -Eeuo pipefail
 address_command=$1
+peer_route_command=$2
 conf=/etc/neutron/neutron.conf
 plugins=$(crudini --get "$conf" DEFAULT service_plugins 2>/dev/null || true)
 case ",$plugins," in
@@ -192,6 +237,8 @@ ExecStart=/usr/bin/ovs-vsctl --may-exist add-port br-bgp enp5s0
 ExecStart=/usr/sbin/ip link set enp5s0 up
 ExecStart=/usr/sbin/ip link set br-bgp up
 ExecStart=$address_command
+$peer_route_command
+ExecStart=/usr/bin/ovs-vsctl set Open_vSwitch . external-ids:neutron-bgp-interconnect-bridge=br-interconnect
 ExecStart=/usr/bin/ovs-vsctl set Open_vSwitch . external-ids:neutron-bgp-peer-bridges=br-bgp
 RemainAfterExit=yes
 
@@ -315,6 +362,24 @@ if ! awk '$1 == "icmp" && $2 == "IPv4" && $3 == "0.0.0.0/0" && $4 == "ingress"' 
 fi
 
 overlay_id=$(os network show bgp-overlay -f value -c id)
+overlay_mtu=$(os network show bgp-overlay -f value -c mtu)
+remote_script hc1 "$overlay_id" "$overlay_mtu" <<'REMOTE'
+set -Eeuo pipefail
+python3 - "$1" "$2" <<'PYTHON'
+import json, subprocess, sys
+network, mtu = sys.argv[1:]
+data = json.loads(subprocess.check_output([
+    'ovn-nbctl', '--no-leader-only', '--timeout=10',
+    '--db=unix:/run/ovn/ovnnb_db.sock', '--format=json',
+    '--columns=name,external_ids', 'find', 'Logical_Switch_Port', 'type=localport',
+], text=True))
+ports = [dict(x[1][1]) for x in data['data']]
+metadata = [x for x in ports if x.get('neutron:device_id') == 'ovnmeta-' + network]
+assert len(metadata) == 1, metadata
+assert metadata[0].get('neutron:mtu') == mtu, metadata
+print('Fresh metadata port MTU matches the network API')
+PYTHON
+REMOTE
 create_server() {
     local name=$1 host=$2 fixed_ip=$3
     if ! os server show "$name" >/dev/null 2>&1; then
@@ -332,6 +397,7 @@ create_server() {
 create_server bgp-test-hc1 "$HC1" 10.244.0.67
 create_server bgp-test-hc2 "$HC2" 10.244.0.178
 create_server bgp-test-vm "$HC3" 10.244.0.110
+create_server bgp-test-samehost "$HC1" 10.244.0.4
 for pair in "bgp-test-hc1 172.20.20.69 10.244.0.67" \
     "bgp-test-hc2 172.20.20.26 10.244.0.178" \
     "bgp-test-vm 172.20.20.60 10.244.0.110"; do

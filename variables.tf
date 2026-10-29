@@ -25,7 +25,7 @@ variable "ssh_public_key" {
 variable "neutron_package_version" {
   description = "Neutron package version pinned on the hyperconverged VMs."
   type        = string
-  default     = "2:28.0.2-0ubuntu1"
+  default     = "2:29.0.0-0ubuntu1~cloud0"
 }
 
 variable "regress_stack_package" {
@@ -48,4 +48,41 @@ variable "bgp_peering_mode" {
     condition     = contains(["unnumbered", "ipv4-numbered"], var.bgp_peering_mode)
     error_message = "bgp_peering_mode must be unnumbered or ipv4-numbered."
   }
+}
+
+variable "cloud_archive" {
+  description = "Signed Ubuntu Cloud Archive pocket on Resolute."
+  type        = string
+  default     = "hibiscus"
+
+  validation {
+    condition     = var.cloud_archive == "hibiscus"
+    error_message = "This fixture uses resolute-updates/hibiscus."
+  }
+}
+
+variable "ovn_runtime_archive" {
+  description = "Native make-install archive of the complete source OVN runtime."
+  type        = string
+
+  validation {
+    condition     = fileexists(var.ovn_runtime_archive)
+    error_message = "Provide the built OVN runtime archive before planning."
+  }
+}
+
+variable "ovn_runtime_manifest" {
+  description = "Build provenance and file manifest for ovn_runtime_archive."
+  type        = string
+
+  validation {
+    condition     = fileexists(var.ovn_runtime_manifest)
+    error_message = "Provide the OVN runtime build manifest before planning."
+  }
+}
+
+variable "ovn_source_revision" {
+  description = "Exact OVN source commit required by the runtime manifest."
+  type        = string
+  default     = "a298c1347d39aa4f277701b98fb18a3679574a39"
 }

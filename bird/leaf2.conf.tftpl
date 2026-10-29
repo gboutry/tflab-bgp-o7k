@@ -26,6 +26,9 @@ protocol bgp spine {
 protocol bgp hc3 {
     local ${numbered ? "172.20.2.1" : "fe80::1"} as 65002;
     interface "eth1";
+%{ if numbered ~}
+    onlink on;
+%{ endif ~}
     neighbor ${numbered ? "172.20.2.13" : "fe80::103%eth1"} as 65103;
     ipv4 {
 %{ if !numbered ~}

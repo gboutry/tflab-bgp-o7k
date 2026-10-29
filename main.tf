@@ -47,7 +47,7 @@ locals {
     leaf1 = {
       type = "container", role = "leaf1", mgmt = 21, cpu = "1", memory = "512MiB", disk = "8GiB"
       interfaces = {
-        hosts0  = { network = "leaf1_hosts", ifname = "eth1", addresses = [local.numbered ? "172.20.1.1/24" : "fe80::1/64"], routes = [] }
+        hosts0  = { network = "leaf1_hosts", ifname = "eth1", addresses = [local.numbered ? "172.20.1.1/32" : "fe80::1/64"], routes = local.numbered ? [{ to = "172.20.1.11/32", scope = "link", from = "172.20.1.1" }, { to = "172.20.1.12/32", scope = "link", from = "172.20.1.1" }] : [] }
         spine0  = { network = "spine_leaf1", ifname = "eth2", addresses = ["172.20.0.1/30"], routes = [] }
         client0 = { network = "client", ifname = "eth3", addresses = ["172.20.10.1/24"], routes = [] }
       }
@@ -56,7 +56,7 @@ locals {
     leaf2 = {
       type = "container", role = "leaf2", mgmt = 22, cpu = "1", memory = "512MiB", disk = "8GiB"
       interfaces = {
-        hosts0 = { network = "leaf2_hosts", ifname = "eth1", addresses = [local.numbered ? "172.20.2.1/24" : "fe80::1/64"], routes = [] }
+        hosts0 = { network = "leaf2_hosts", ifname = "eth1", addresses = [local.numbered ? "172.20.2.1/32" : "fe80::1/64"], routes = local.numbered ? [{ to = "172.20.2.13/32", scope = "link", from = "172.20.2.1" }] : [] }
         spine0 = { network = "spine_leaf2", ifname = "eth2", addresses = ["172.20.0.5/30"], routes = [] }
       }
       asn = 65002
@@ -136,7 +136,13 @@ resource "lxd_network" "lab" {
 # Cloud-init runs only at first boot. Recreate guests when the peering mode
 # or inventory changes rather than leaving stale guest configuration.
 resource "terraform_data" "peering_mode" {
-  triggers_replace = [var.bgp_peering_mode, filesha256("${path.module}/inventory.json")]
+  triggers_replace = [
+    var.bgp_peering_mode,
+    filesha256("${path.module}/inventory.json"),
+    var.cloud_archive,
+    filesha256(var.ovn_runtime_archive),
+    filesha256(var.ovn_runtime_manifest),
+  ]
 }
 
 resource "lxd_instance" "node" {
@@ -206,6 +212,10 @@ resource "terraform_data" "deploy" {
     var.name_prefix,
     var.bgp_peering_mode,
     var.neutron_package_version,
+    var.cloud_archive,
+    filesha256(var.ovn_runtime_archive),
+    filesha256(var.ovn_runtime_manifest),
+    filesha256("${path.module}/install-ovn-runtime.py"),
     filesha256(var.regress_stack_package),
     filesha256("${path.module}/deploy.sh"),
     filesha256("${path.module}/main.tf"),
@@ -223,11 +233,18 @@ resource "terraform_data" "deploy" {
     command = "bash \"${path.module}/deploy.sh\""
 
     environment = {
-      BGP_PEERING_MODE  = var.bgp_peering_mode
-      NAME_PREFIX       = var.name_prefix
-      REGRESS_STACK_DEB = abspath(var.regress_stack_package)
-      NEUTRON_VERSION   = var.neutron_package_version
-      INVENTORY_JSON    = local.inventory_json
+      BGP_PEERING_MODE     = var.bgp_peering_mode
+      NAME_PREFIX          = var.name_prefix
+      REGRESS_STACK_DEB    = abspath(var.regress_stack_package)
+      NEUTRON_VERSION      = var.neutron_package_version
+      INVENTORY_JSON       = local.inventory_json
+      CLOUD_ARCHIVE        = var.cloud_archive
+      OVN_RUNTIME_ARCHIVE  = abspath(var.ovn_runtime_archive)
+      OVN_RUNTIME_MANIFEST = abspath(var.ovn_runtime_manifest)
+      OVN_ARCHIVE_SHA256   = filesha256(var.ovn_runtime_archive)
+      OVN_MANIFEST_SHA256  = filesha256(var.ovn_runtime_manifest)
+      OVN_SOURCE_REVISION  = var.ovn_source_revision
+      OVN_INSTALLER        = abspath("${path.module}/install-ovn-runtime.py")
     }
   }
 }
@@ -265,9 +282,7 @@ locals {
           { path = "/etc/bird/bird.conf", permissions = "0644", content = local.bird_configs[node] },
           { path = "/etc/sysctl.d/90-${var.name_prefix}-routing.conf", permissions = "0644", content = "net.ipv4.ip_forward=1\nnet.ipv4.conf.all.rp_filter=0\nnet.ipv4.conf.default.rp_filter=0\n" }
         ] : [],
-        spec.role == "hc" ? [
-          { path = "/etc/apt/preferences.d/90-${var.name_prefix}-neutron", permissions = "0644", content = "Package: neutron neutron-* python3-neutron*\nPin: version ${var.neutron_package_version}\nPin-Priority: 1001\n" },
-        ] : []
+        []
       )
       runcmd = concat(
         contains(["leaf1", "leaf2", "spine"], spec.role) ? [

@@ -40,6 +40,9 @@ protocol kernel ovn_egress {
 protocol bgp leaf {
     local ${local_address} as ${local_asn};
     interface "${bridge}";
+%{ if numbered ~}
+    onlink on;
+%{ endif ~}
     neighbor ${leaf_address} as ${leaf_asn};
     ipv4 {
 %{ if !numbered ~}

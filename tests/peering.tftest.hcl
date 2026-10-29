@@ -5,6 +5,8 @@ mock_provider "lxd" {}
 variables {
   # Planning tests do not install the package; use a readable fixture path.
   regress_stack_package = "README.md"
+  ovn_runtime_archive = "README.md"
+  ovn_runtime_manifest = "README.md"
 }
 
 run "default_unnumbered" {
@@ -43,7 +45,8 @@ run "ipv4_numbered" {
       strcontains(local.bird_configs[node], "local ${peer.address} as") &&
       strcontains(local.bird_configs[node], "neighbor ${peer.leaf} as") &&
       !strcontains(local.bird_configs[node], "extended next hop on;") &&
-      !strcontains(local.bird_configs[node], "fe80::")
+      !strcontains(local.bird_configs[node], "fe80::") &&
+      strcontains(local.bird_configs[node], "onlink on;")
     ])
     error_message = "Every HC must use IPv4 transport and IPv4 next hops."
   }
@@ -59,15 +62,18 @@ run "ipv4_numbered" {
 
   assert {
     condition = (
-      local.nodes.leaf1.interfaces.hosts0.addresses == ["172.20.1.1/24"] &&
-      local.nodes.leaf2.interfaces.hosts0.addresses == ["172.20.2.1/24"] &&
+      local.nodes.leaf1.interfaces.hosts0.addresses == ["172.20.1.1/32"] &&
+      local.nodes.leaf2.interfaces.hosts0.addresses == ["172.20.2.1/32"] &&
       alltrue([for leaf in ["leaf1", "leaf2"] : !strcontains(local.bird_configs[leaf], "fe80::")])
     )
     error_message = "ToR interfaces must use separate numbered host subnets."
   }
 
   assert {
-    condition     = terraform_data.peering_mode.triggers_replace == ["ipv4-numbered", filesha256("${path.module}/inventory.json")]
+    condition     = terraform_data.peering_mode.triggers_replace == [
+      "ipv4-numbered", filesha256("${path.module}/inventory.json"),
+      "hibiscus", filesha256(var.ovn_runtime_archive), filesha256(var.ovn_runtime_manifest)
+    ]
     error_message = "Mode changes must trigger guest replacement."
   }
 }

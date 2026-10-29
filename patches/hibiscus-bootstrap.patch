@@ -1,0 +1,313 @@
+Description: Support Hibiscus Glance and Watcher bootstrap
+ Adapt the native upstream Apache service transitions and Glance staging
+ setup while retaining the PR96 multinode bootstrap and Ceph backend.
+ Isolate the bootstrap ordering fixture from host service commands.
+ Unrelated Watcher Tempest microversion changes are intentionally excluded.
+Origin: backport, https://github.com/canonical/regress-stack/commit/19eacd1f2b5bd38e17f7d2773aae7c4dbe3c39b1
+ https://github.com/canonical/regress-stack/commit/57229c9fa48db7aba63c86d1e476a3954913b8d8
+Author: Himawan Winarto <himawan.winarto@canonical.com>
+Forwarded: not-needed
+Last-Update: 2026-10-29
+
+diff --git a/src/regress_stack/core/utils.py b/src/regress_stack/core/utils.py
+index 6d73a56..62d91d3 100644
+--- a/src/regress_stack/core/utils.py
++++ b/src/regress_stack/core/utils.py
+@@ -154,10 +154,29 @@ def restart_service(*services: str):
+     run("systemctl", ["restart", *services])
+ 
+ 
++def has_service(service: str) -> bool:
++    """Check if a systemd unit named ``service`` is present."""
++    try:
++        result = subprocess.run(
++            ["systemctl", "cat", service],
++            check=False,
++            stdout=subprocess.DEVNULL,
++            stderr=subprocess.DEVNULL,
++        )
++        return result.returncode == 0
++    except OSError:
++        return False
++
++
+ def restart_apache():
+     restart_service("apache2")
+ 
+ 
++def graceful_apache():
++    """Gracefully reload apache2 (WSGI workers) without dropping connections."""
++    run("systemctl", ["reload", "apache2"])
++
++
+ def enable_service(service: str):
+     run("systemctl", ["enable", service])
+ 
+diff --git a/src/regress_stack/modules/glance.py b/src/regress_stack/modules/glance.py
+index ab4dd82..9362f4d 100644
+--- a/src/regress_stack/modules/glance.py
++++ b/src/regress_stack/modules/glance.py
+@@ -1,6 +1,7 @@
+ # Copyright 2025 - Canonical Ltd
+ # SPDX-License-Identifier: GPL-3.0-only
+ 
++import logging
+ import pathlib
+ 
+ from regress_stack.core import apt as core_apt
+@@ -8,6 +9,8 @@ from regress_stack.core import utils as core_utils
+ from regress_stack.modules import barbican, keystone, mysql
+ from regress_stack.modules import utils as module_utils
+ 
++LOG = logging.getLogger(__name__)
++
+ DEPENDENCIES = {keystone, mysql}
+ OPTIONAL_DEPENDENCIES = {barbican}
+ PACKAGES = ["glance-api"]
+@@ -34,6 +37,12 @@ def _disable_strict_image_format_validation():
+     module_utils.cfg_set(CONF, ("image_format", "require_image_format_match", "false"))
+ 
+ 
++def _ensure_staging_dir():
++    staging = pathlib.Path("/var/lib/glance/staging")
++    staging.mkdir(parents=True, exist_ok=True)
++    core_utils.run("chown", ["glance:glance", str(staging)])
++
++
+ def setup():
+     db_user, db_pass = mysql.ensure_service(SERVICE)
+     username, password = keystone.ensure_service_account(SERVICE, SERVICE_TYPE, URL)
+@@ -51,7 +60,13 @@ def setup():
+         ),
+         ("DEFAULT", "workers", "1"),
+         *_store_config(),
++        (
++            "os_glance_staging_store",
++            "filesystem_store_datadir",
++            "/var/lib/glance/staging",
++        ),
+     )
++    _ensure_staging_dir()
+     _disable_strict_image_format_validation()
+     if barbican.installed():
+         module_utils.cfg_set(
+@@ -62,7 +77,12 @@ def setup():
+             ),
+         )
+     module_utils.bootstrap_sudo("glance-manage", ["db_sync"], user=SERVICE)
+-    core_utils.restart_service("glance-api")
++    if core_utils.has_service("glance-api"):
++        core_utils.restart_service("glance-api")
++        LOG.info("Using standalone glance-api unit")
++    else:
++        core_utils.graceful_apache()
++        LOG.info("Using apache2 WSGI for glance-api")
+ 
+ 
+ def ensure_image(name: str, filepath: pathlib.Path, **kwargs):
+diff --git a/src/regress_stack/modules/watcher.py b/src/regress_stack/modules/watcher.py
+index a7562bb..056620b 100644
+--- a/src/regress_stack/modules/watcher.py
++++ b/src/regress_stack/modules/watcher.py
+@@ -1,12 +1,15 @@
+ # Copyright 2026 - Canonical Ltd
+ # SPDX-License-Identifier: GPL-3.0-only
+ 
++import logging
+ import pathlib
+ 
+ from regress_stack.core import utils as core_utils
+ from regress_stack.modules import keystone, mysql, nova, rabbitmq
+ from regress_stack.modules import utils as module_utils
+ 
++LOG = logging.getLogger(__name__)
++
+ DEPENDENCIES = {keystone, mysql, nova, rabbitmq}
+ BASE_PACKAGES = [
+     "watcher-api",
+@@ -57,16 +60,49 @@ def setup():
+         ("oslo_messaging_notifications", "driver", "messagingv2"),
+     )
+ 
+-    # Package installation starts the daemons before the database schema is
+-    # initialized.  Stop them to prevent the decision engine from racing the
+-    # migration and holding metadata locks on partially-created tables.
+-    for service in SERVICES:
+-        core_utils.run("systemctl", ["stop", service])
++    _stop_services()
+ 
+     module_utils.bootstrap_sudo("watcher-db-manage", ["upgrade"], user=SERVICE)
++    _start_services()
++
++
++def _stop_services():
++    """Stop the watcher services.
++
++    Hibiscus watcher-api has no standalone unit (WSGI under apache2), so
++    only stop the services that exist.
++    """
+     for service in SERVICES:
+-        core_utils.restart_service(service)
+-        core_utils.run("systemctl", ["is-active", "--quiet", service])
++        if core_utils.has_service(service):
++            core_utils.run("systemctl", ["stop", service])
++
++
++def _start_services():
++    """Start the watcher services.
++
++    Hibiscus watcher (>= 17.0.0) serves the API via apache2 (Listen 9322)
++    instead of a standalone watcher-api unit. Reload apache2 to pick up the
++    watcher.conf as a full restart would bounce other WSGI services, otherwise
++    restart the unit.
++
++    The decision engine and applier remain standalone daemons.
++    """
++    if core_utils.has_service("watcher-api"):
++        core_utils.restart_service("watcher-api")
++        LOG.info("Using standalone watcher-api unit")
++    else:
++        core_utils.graceful_apache()
++        LOG.info("Using apache2 WSGI for watcher-api")
++
++    for service in SERVICES:
++        if service != "watcher-api":
++            core_utils.restart_service(service)
++
++            # Ensure the service is active before returning, as the decision engine and
++            # applier are not WSGI services and do not have a healthcheck endpoint.
++            core_utils.run("systemctl", ["is-active", "--quiet", service])
++
++            LOG.info("Started %s", service)
+ 
+ 
+ def configure_tempest(tempest_conf: pathlib.Path):
+diff --git a/tests/modules/test_glance.py b/tests/modules/test_glance.py
+index 26651dc..1c8ade4 100644
+--- a/tests/modules/test_glance.py
++++ b/tests/modules/test_glance.py
+@@ -1,6 +1,8 @@
+ # Copyright 2025 - Canonical Ltd
+ # SPDX-License-Identifier: GPL-3.0-only
+ 
++import pytest
++
+ from regress_stack.modules import glance
+ 
+ 
+@@ -66,3 +68,55 @@ def test_disable_strict_image_format_validation_noop(monkeypatch):
+ 
+     assert warnings == []
+     assert cfg_calls == []
++
++
++def _patch_setup(monkeypatch, events):
++    monkeypatch.setattr(glance.mysql, "ensure_service", lambda _s: ("db-u", "db-p"))
++    monkeypatch.setattr(
++        glance.mysql, "connection_string", lambda *_a: "mysql+pymysql://glance"
++    )
++    monkeypatch.setattr(
++        glance.keystone, "ensure_service_account", lambda *_a: ("u", "p")
++    )
++    monkeypatch.setattr(glance.keystone, "authtoken_service", lambda *_a: {})
++    monkeypatch.setattr(glance.module_utils, "dict_to_cfg_set_args", lambda *_a: ())
++    monkeypatch.setattr(glance.module_utils, "cfg_set", lambda *_a, **_k: None)
++    monkeypatch.setattr(glance, "_ensure_staging_dir", lambda: events.append("staging"))
++    monkeypatch.setattr(
++        glance,
++        "_disable_strict_image_format_validation",
++        lambda: events.append("format"),
++    )
++    monkeypatch.setattr(glance.barbican, "installed", lambda: False)
++    monkeypatch.setattr(
++        glance.core_utils,
++        "sudo",
++        lambda c, a, user=None: events.append(("sudo", c, a, user)),
++    )
++    monkeypatch.setattr(
++        glance.core_utils,
++        "restart_service",
++        lambda svc: events.append(("restart", svc)),
++    )
++    monkeypatch.setattr(
++        glance.core_utils, "graceful_apache", lambda: events.append("reload")
++    )
++
++
++@pytest.mark.parametrize("unit_exists", [True, False])
++def test_setup_restarts_or_reloads_glance_api(monkeypatch, unit_exists):
++    events = []
++    _patch_setup(monkeypatch, events)
++    monkeypatch.setattr(glance.core_utils, "has_service", lambda _svc: unit_exists)
++
++    glance.setup()
++
++    assert "staging" in events
++    assert "format" in events
++    assert ("sudo", "glance-manage", ["db_sync"], "glance") in events
++    if unit_exists:
++        assert ("restart", "glance-api") in events
++        assert "reload" not in events
++    else:
++        assert "reload" in events
++        assert ("restart", "glance-api") not in events
+diff --git a/tests/modules/test_watcher.py b/tests/modules/test_watcher.py
+index 69597c4..45a2961 100644
+--- a/tests/modules/test_watcher.py
++++ b/tests/modules/test_watcher.py
+@@ -75,6 +75,18 @@ def test_setup_configures_and_starts_services(monkeypatch):
+         "run",
+         lambda command, args: service_events.append(("run", command, args)),
+     )
++    # Hibiscus: the standalone watcher-api unit is retired (WSGI under apache2),
++    # while the decision engine and applier remain standalone daemons.
++    monkeypatch.setattr(
++        watcher.core_utils,
++        "has_service",
++        lambda service: service != "watcher-api",
++    )
++    monkeypatch.setattr(
++        watcher.core_utils,
++        "graceful_apache",
++        lambda: service_events.append(("graceful-apache",)),
++    )
+ 
+     watcher.setup()
+ 
+@@ -95,11 +107,12 @@ def test_setup_configures_and_starts_services(monkeypatch):
+         )
+     ]
+     assert service_events == [
+-        *[("run", "systemctl", ["stop", service]) for service in watcher.SERVICES],
++        *[("run", "systemctl", ["stop", service]) for service in watcher.SERVICES[1:]],
+         ("sudo", "watcher-db-manage", ["upgrade"], watcher.SERVICE),
++        ("graceful-apache",),
+         *[
+             event
+-            for service in watcher.SERVICES
++            for service in watcher.SERVICES[1:]
+             for event in (
+                 ("restart", service),
+                 ("run", "systemctl", ["is-active", "--quiet", service]),
+diff --git a/tests/multinode/test_cli.py b/tests/multinode/test_cli.py
+index 0c734dc..9ab7813 100644
+--- a/tests/multinode/test_cli.py
++++ b/tests/multinode/test_cli.py
+@@ -117,11 +117,17 @@ def test_bootstrap_setup_export_is_last(context, tmp_path, monkeypatch):
+     monkeypatch.setattr(
+         setup.profiles, "execution_order", lambda *args, **kwargs: [module]
+     )
++    monkeypatch.setattr(
++        setup.services,
++        "stop_unconfigured",
++        lambda: order.append("stop-unconfigured"),
++    )
+     monkeypatch.setattr(setup.services, "prepare", Mock())
+     monkeypatch.setattr(setup.services, "finish", Mock())
+     monkeypatch.setattr(type(context), "export", lambda *args: order.append("export"))
+     setup.run(inventory, "node1", export=tmp_path / "exports")
+     assert order == [
++        "stop-unconfigured",
+         "database",
+         "access",
+         "messaging",
